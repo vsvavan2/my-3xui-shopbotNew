@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: 3xui-shopbot
+Version: 1.3.0
+Summary: Бот для автоматической продажи VLESS VPN
+License-File: LICENSE
+Requires-Dist: aiogram==3.21.0
+Requires-Dist: flask==3.1.1
+Requires-Dist: flask-wtf==1.2.1
+Requires-Dist: py3xui==0.4.0
+Requires-Dist: pyotp==2.9.0
+Requires-Dist: python-dotenv==1.1.1
+Requires-Dist: qrcode[pil]==8.2
+Requires-Dist: yookassa==3.5.0
+Requires-Dist: aiosend==2.1.2
+Requires-Dist: aiohttp==3.9.5
+Requires-Dist: aiohttp-sse-client==0.2.1
+Requires-Dist: pytonconnect==0.3.2
+Requires-Dist: paramiko==3.5.0
+Requires-Dist: psutil==5.9.8
+Requires-Dist: colorama==0.4.6
+Provides-Extra: dev
+Requires-Dist: pip-tools; extra == "dev"
+Requires-Dist: pylint; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Dynamic: license-file
