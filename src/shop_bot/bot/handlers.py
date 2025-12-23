@@ -2191,6 +2191,308 @@ def get_user_router() -> Router:
             await state.clear()
             return
 
+    @user_router.callback_query(PaymentProcess.waiting_for_payment_method, F.data == "pay_unitpay")
+    async def create_unitpay_payment_handler(callback: types.CallbackQuery, state: FSMContext):
+        await callback.answer("Готовлю ссылку UnitPay…")
+        data = await state.get_data()
+        user_data = get_user(callback.from_user.id)
+        plan = get_plan_by_id(data.get('plan_id'))
+        if not plan:
+            await callback.message.edit_text("❌ Произошла ошибка при выборе тарифа.")
+            await state.clear()
+            return
+        # Цена со скидкой по рефералке
+        base_price = Decimal(str(plan['price']))
+        price_rub = base_price
+        if user_data and user_data.get('referred_by') and user_data.get('total_spent', 0) == 0:
+            try:
+                discount_percentage = Decimal(get_setting("referral_discount") or "0")
+            except Exception:
+                discount_percentage = Decimal("0")
+            if discount_percentage > 0:
+                price_rub = base_price - (base_price * discount_percentage / 100).quantize(Decimal("0.01"))
+
+        final_price_decimal = price_rub
+        try:
+            final_price_from_state = data.get('final_price')
+            if final_price_from_state is not None:
+                final_price_decimal = Decimal(str(final_price_from_state)).quantize(Decimal("0.01"))
+        except Exception:
+            pass
+        if final_price_decimal < Decimal('0'):
+            final_price_decimal = Decimal('0.00')
+        final_price_float = float(final_price_decimal)
+
+        public_id = (get_setting("unitpay_merchant_id") or "").strip()
+        payment_systems = (get_setting("unitpay_allowed_methods") or "").strip() or None
+        if not public_id:
+            await callback.message.edit_text("❌ Оплата через UnitPay временно недоступна.")
+            await state.clear()
+            return
+
+        months = int(plan['months'])
+        user_id = callback.from_user.id
+        payment_id = str(uuid.uuid4())
+        metadata = {
+            "payment_id": payment_id,
+            "user_id": user_id,
+            "months": months,
+            "price": final_price_float,
+            "action": data.get('action'),
+            "key_id": data.get('key_id'),
+            "host_name": data.get('host_name'),
+            "plan_id": data.get('plan_id'),
+            "customer_email": data.get('customer_email'),
+            "payment_method": "UnitPay",
+            "promo_code": data.get('promo_code'),
+            "promo_discount_percent": data.get('promo_discount_percent'),
+            "promo_discount_amount": data.get('promo_discount_amount'),
+        }
+        try:
+            create_pending_transaction(payment_id, user_id, final_price_float, metadata)
+        except Exception as e:
+            logger.warning(f"UnitPay: не удалось создать ожидающую транзакцию: {e}")
+
+        desc = f"Оплата {months} мес."
+        pay_url = _build_unitpay_url(public_id, final_price_float, payment_id, desc, currency="RUB", payment_systems=payment_systems)
+
+        await state.clear()
+        try:
+            await callback.message.edit_text(
+                "Нажмите на кнопку ниже для оплаты:",
+                reply_markup=keyboards.create_payment_keyboard(pay_url)
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(
+                "Нажмите на кнопку ниже для оплаты:",
+                reply_markup=keyboards.create_payment_keyboard(pay_url)
+            )
+
+    @user_router.callback_query(PaymentProcess.waiting_for_payment_method, F.data == "pay_freekassa")
+    async def create_freekassa_payment_handler(callback: types.CallbackQuery, state: FSMContext):
+        await callback.answer("Готовлю ссылку FreeKassa…")
+        data = await state.get_data()
+        user_data = get_user(callback.from_user.id)
+        plan = get_plan_by_id(data.get('plan_id'))
+        if not plan:
+            await callback.message.edit_text("❌ Произошла ошибка при выборе тарифа.")
+            await state.clear()
+            return
+        base_price = Decimal(str(plan['price']))
+        price_rub = base_price
+        if user_data and user_data.get('referred_by') and user_data.get('total_spent', 0) == 0:
+            try:
+                discount_percentage = Decimal(get_setting("referral_discount") or "0")
+            except Exception:
+                discount_percentage = Decimal("0")
+            if discount_percentage > 0:
+                price_rub = base_price - (base_price * discount_percentage / 100).quantize(Decimal("0.01"))
+        final_price_decimal = price_rub
+        try:
+            final_price_from_state = data.get('final_price')
+            if final_price_from_state is not None:
+                final_price_decimal = Decimal(str(final_price_from_state)).quantize(Decimal("0.01"))
+        except Exception:
+            pass
+        if final_price_decimal < Decimal('0'):
+            final_price_decimal = Decimal('0.00')
+        final_price_float = float(final_price_decimal)
+
+        merchant_id = (get_setting("freekassa_merchant_id") or "").strip()
+        secret_key = (get_setting("freekassa_secret_key") or "").strip()
+        if not merchant_id or not secret_key:
+            await callback.message.edit_text("❌ Оплата через FreeKassa временно недоступна.")
+            await state.clear()
+            return
+
+        months = int(plan['months'])
+        user_id = callback.from_user.id
+        payment_id = str(uuid.uuid4())
+        metadata = {
+            "payment_id": payment_id,
+            "user_id": user_id,
+            "months": months,
+            "price": final_price_float,
+            "action": data.get('action'),
+            "key_id": data.get('key_id'),
+            "host_name": data.get('host_name'),
+            "plan_id": data.get('plan_id'),
+            "customer_email": data.get('customer_email'),
+            "payment_method": "FreeKassa",
+            "promo_code": data.get('promo_code'),
+            "promo_discount_percent": data.get('promo_discount_percent'),
+            "promo_discount_amount": data.get('promo_discount_amount'),
+        }
+        try:
+            create_pending_transaction(payment_id, user_id, final_price_float, metadata)
+        except Exception as e:
+            logger.warning(f"FreeKassa: не удалось создать ожидающую транзакцию: {e}")
+
+        desc = f"Оплата {months} мес."
+        pay_url = _build_freekassa_url(merchant_id, secret_key, final_price_float, payment_id, currency="rub", desc=desc)
+
+        await state.clear()
+        try:
+            await callback.message.edit_text(
+                "Нажмите на кнопку ниже для оплаты:",
+                reply_markup=keyboards.create_payment_keyboard(pay_url)
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(
+                "Нажмите на кнопку ниже для оплаты:",
+                reply_markup=keyboards.create_payment_keyboard(pay_url)
+            )
+
+    @user_router.callback_query(PaymentProcess.waiting_for_payment_method, F.data == "pay_enot")
+    async def create_enot_payment_handler(callback: types.CallbackQuery, state: FSMContext):
+        await callback.answer("Готовлю ссылку ENOT…")
+        data = await state.get_data()
+        user_data = get_user(callback.from_user.id)
+        plan = get_plan_by_id(data.get('plan_id'))
+        if not plan:
+            await callback.message.edit_text("❌ Произошла ошибка при выборе тарифа.")
+            await state.clear()
+            return
+        base_price = Decimal(str(plan['price']))
+        price_rub = base_price
+        if user_data and user_data.get('referred_by') and user_data.get('total_spent', 0) == 0:
+            try:
+                discount_percentage = Decimal(get_setting("referral_discount") or "0")
+            except Exception:
+                discount_percentage = Decimal("0")
+            if discount_percentage > 0:
+                price_rub = base_price - (base_price * discount_percentage / 100).quantize(Decimal("0.01"))
+        final_price_decimal = price_rub
+        try:
+            final_price_from_state = data.get('final_price')
+            if final_price_from_state is not None:
+                final_price_decimal = Decimal(str(final_price_from_state)).quantize(Decimal("0.01"))
+        except Exception:
+            pass
+        if final_price_decimal < Decimal('0'):
+            final_price_decimal = Decimal('0.00')
+        final_price_float = float(final_price_decimal)
+
+        merchant_id = (get_setting("enot_merchant_id") or "").strip()
+        secret_key = (get_setting("enot_secret_key") or "").strip()
+        if not merchant_id or not secret_key:
+            await callback.message.edit_text("❌ Оплата через ENOT временно недоступна.")
+            await state.clear()
+            return
+
+        months = int(plan['months'])
+        user_id = callback.from_user.id
+        payment_id = str(uuid.uuid4())
+        metadata = {
+            "payment_id": payment_id,
+            "user_id": user_id,
+            "months": months,
+            "price": final_price_float,
+            "action": data.get('action'),
+            "key_id": data.get('key_id'),
+            "host_name": data.get('host_name'),
+            "plan_id": data.get('plan_id'),
+            "customer_email": data.get('customer_email'),
+            "payment_method": "ENOT.io",
+            "promo_code": data.get('promo_code'),
+            "promo_discount_percent": data.get('promo_discount_percent'),
+            "promo_discount_amount": data.get('promo_discount_amount'),
+        }
+        try:
+            create_pending_transaction(payment_id, user_id, final_price_float, metadata)
+        except Exception as e:
+            logger.warning(f"ENOT: не удалось создать ожидающую транзакцию: {e}")
+
+        desc = f"Оплата {months} мес."
+        pay_url = _build_enot_url(merchant_id, secret_key, final_price_float, payment_id, currency="rub", desc=desc)
+
+        await state.clear()
+        try:
+            await callback.message.edit_text(
+                "Нажмите на кнопку ниже для оплаты:",
+                reply_markup=keyboards.create_payment_keyboard(pay_url)
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(
+                "Нажмите на кнопку ниже для оплаты:",
+                reply_markup=keyboards.create_payment_keyboard(pay_url)
+            )
+
+    @user_router.callback_query(PaymentProcess.waiting_for_payment_method, F.data == "pay_interkassa")
+    async def create_interkassa_payment_handler(callback: types.CallbackQuery, state: FSMContext):
+        await callback.answer("Готовлю ссылку InterKassa…")
+        data = await state.get_data()
+        user_data = get_user(callback.from_user.id)
+        plan = get_plan_by_id(data.get('plan_id'))
+        if not plan:
+            await callback.message.edit_text("❌ Произошла ошибка при выборе тарифа.")
+            await state.clear()
+            return
+        base_price = Decimal(str(plan['price']))
+        price_rub = base_price
+        if user_data and user_data.get('referred_by') and user_data.get('total_spent', 0) == 0:
+            try:
+                discount_percentage = Decimal(get_setting("referral_discount") or "0")
+            except Exception:
+                discount_percentage = Decimal("0")
+            if discount_percentage > 0:
+                price_rub = base_price - (base_price * discount_percentage / 100).quantize(Decimal("0.01"))
+        final_price_decimal = price_rub
+        try:
+            final_price_from_state = data.get('final_price')
+            if final_price_from_state is not None:
+                final_price_decimal = Decimal(str(final_price_from_state)).quantize(Decimal("0.01"))
+        except Exception:
+            pass
+        if final_price_decimal < Decimal('0'):
+            final_price_decimal = Decimal('0.00')
+        final_price_float = float(final_price_decimal)
+
+        shop_id = (get_setting("interkassa_shop_id") or "").strip()
+        secret_key = (get_setting("interkassa_secret_key") or "").strip()
+        if not shop_id or not secret_key:
+            await callback.message.edit_text("❌ Оплата через InterKassa временно недоступна.")
+            await state.clear()
+            return
+
+        months = int(plan['months'])
+        user_id = callback.from_user.id
+        payment_id = str(uuid.uuid4())
+        metadata = {
+            "payment_id": payment_id,
+            "user_id": user_id,
+            "months": months,
+            "price": final_price_float,
+            "action": data.get('action'),
+            "key_id": data.get('key_id'),
+            "host_name": data.get('host_name'),
+            "plan_id": data.get('plan_id'),
+            "customer_email": data.get('customer_email'),
+            "payment_method": "InterKassa",
+            "promo_code": data.get('promo_code'),
+            "promo_discount_percent": data.get('promo_discount_percent'),
+            "promo_discount_amount": data.get('promo_discount_amount'),
+        }
+        try:
+            create_pending_transaction(payment_id, user_id, final_price_float, metadata)
+        except Exception as e:
+            logger.warning(f"InterKassa: не удалось создать ожидающую транзакцию: {e}")
+
+        desc = f"Оплата {months} мес."
+        pay_url = _build_interkassa_url(shop_id, secret_key, final_price_float, payment_id, currency="RUB", desc=desc)
+
+        await state.clear()
+        try:
+            await callback.message.edit_text(
+                "Нажмите на кнопку ниже для оплаты:",
+                reply_markup=keyboards.create_payment_keyboard(pay_url)
+            )
+        except TelegramBadRequest:
+            await callback.message.answer(
+                "Нажмите на кнопку ниже для оплаты:",
+                reply_markup=keyboards.create_payment_keyboard(pay_url)
+            )
+
         plan = get_plan_by_id(plan_id)
         if not plan:
             logger.error(f"Попытка создания счета Crypto Pay не удалась для пользователя {user_id}: План с id {plan_id} не найден.")
@@ -2658,6 +2960,102 @@ def _build_yoomoney_quickpay_url(
         return f"{base}?{urlencode(params)}"
     except Exception:
         return "https://yoomoney.ru/"
+
+def _build_unitpay_url(
+    public_id: str,
+    amount: float,
+    account: str,
+    desc: str,
+    currency: str = "RUB",
+    payment_systems: Optional[str] = None,
+) -> str:
+    try:
+        base = f"https://unitpay.money/pay/{public_id}"
+        params = {
+            "sum": f"{float(amount):.2f}",
+            "account": account,
+            "desc": desc,
+            "currency": currency,
+        }
+        if payment_systems:
+            params["paymentSystem"] = payment_systems
+        return f"{base}?{urlencode(params)}"
+    except Exception:
+        return "https://unitpay.money/"
+
+def _build_freekassa_url(
+    merchant_id: str,
+    secret: str,
+    amount: float,
+    order_id: str,
+    currency: str = "rub",
+    desc: Optional[str] = None,
+) -> str:
+    try:
+        sign_str = f"{merchant_id}:{float(amount):.2f}:{secret}:{currency}:{order_id}"
+        sign = hashlib.md5(sign_str.encode()).hexdigest()
+        params = {
+            "m": merchant_id,
+            "oa": f"{float(amount):.2f}",
+            "o": order_id,
+            "currency": currency,
+            "sign": sign,
+        }
+        if desc:
+            params["us_desc"] = desc
+        return f"https://pay.freekassa.ru/?{urlencode(params)}"
+    except Exception:
+        return "https://pay.freekassa.ru/"
+
+def _build_enot_url(
+    merchant_id: str,
+    secret: str,
+    amount: float,
+    order_id: str,
+    currency: str = "rub",
+    desc: Optional[str] = None,
+) -> str:
+    try:
+        sign_raw = f"{merchant_id}:{order_id}:{float(amount):.2f}:{currency}:{secret}"
+        sign = hashlib.sha256(sign_raw.encode()).hexdigest()
+        params = {
+            "m": merchant_id,
+            "o": order_id,
+            "amount": f"{float(amount):.2f}",
+            "currency": currency,
+            "sign": sign,
+        }
+        if desc:
+            params["desc"] = desc
+        return f"https://enot.io/pay?{urlencode(params)}"
+    except Exception:
+        return "https://enot.io/"
+
+def _build_interkassa_url(
+    shop_id: str,
+    secret: str,
+    amount: float,
+    order_id: str,
+    currency: str = "RUB",
+    desc: Optional[str] = None,
+) -> str:
+    try:
+        data = {
+            "ik_co_id": shop_id,
+            "ik_pm_no": order_id,
+            "ik_am": f"{float(amount):.2f}",
+            "ik_cur": currency,
+        }
+        if desc:
+            data["ik_desc"] = desc
+        # InterKassa sign: base64( sha256(implode(':', values_sorted) + ':' + secret) )
+        items = sorted((k, str(v)) for k, v in data.items())
+        sign_str = ":".join(v for _, v in items) + ":" + secret
+        sign = base64.b64encode(hashlib.sha256(sign_str.encode()).digest()).decode()
+        data["ik_sign"] = sign
+        return f"https://sci.interkassa.com/?{urlencode(data)}"
+    except Exception:
+        return "https://sci.interkassa.com/"
 
 async def _yoomoney_find_payment(label: str) -> Optional[dict]:
     token = (get_setting("yoomoney_api_token") or "").strip()

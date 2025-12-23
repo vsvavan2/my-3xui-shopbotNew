@@ -665,6 +665,15 @@ def create_payment_method_keyboard(
             builder.button(text="🏦 СБП / Банковская карта", callback_data="pay_yookassa")
         else:
             builder.button(text="🏦 Банковская карта", callback_data="pay_yookassa")
+    # Дополнительные провайдеры
+    if payment_methods and payment_methods.get("unitpay"):
+        builder.button(text="🏦 UnitPay", callback_data="pay_unitpay")
+    if payment_methods and payment_methods.get("freekassa"):
+        builder.button(text="🏦 FreeKassa", callback_data="pay_freekassa")
+    if payment_methods and payment_methods.get("enot"):
+        builder.button(text="🏦 ENOT.io", callback_data="pay_enot")
+    if payment_methods and payment_methods.get("interkassa"):
+        builder.button(text="🏦 InterKassa", callback_data="pay_interkassa")
     if payment_methods and payment_methods.get("heleket"):
         builder.button(text="💎 Криптовалюта", callback_data="pay_heleket")
     if payment_methods and payment_methods.get("cryptobot"):

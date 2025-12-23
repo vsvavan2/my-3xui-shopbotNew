@@ -99,6 +99,26 @@ class BotController:
             heleket_shop_id = database.get_setting("heleket_merchant_id")
             heleket_api_key = database.get_setting("heleket_api_key")
             heleket_enabled = bool(heleket_api_key and heleket_shop_id)
+            # UnitPay
+            unitpay_flag = database.get_setting("unitpay_enabled")
+            unitpay_public_id = database.get_setting("unitpay_merchant_id")
+            unitpay_secret = database.get_setting("unitpay_secret_key")
+            unitpay_enabled = (str(unitpay_flag).lower() in ("true", "1", "yes", "on")) and bool(unitpay_public_id and unitpay_secret)
+            # FreeKassa
+            freekassa_flag = database.get_setting("freekassa_enabled")
+            freekassa_mid = database.get_setting("freekassa_merchant_id")
+            freekassa_secret = database.get_setting("freekassa_secret_key")
+            freekassa_enabled = (str(freekassa_flag).lower() in ("true", "1", "yes", "on")) and bool(freekassa_mid and freekassa_secret)
+            # ENOT.io
+            enot_flag = database.get_setting("enot_enabled")
+            enot_mid = database.get_setting("enot_merchant_id")
+            enot_secret = database.get_setting("enot_secret_key")
+            enot_enabled = (str(enot_flag).lower() in ("true", "1", "yes", "on")) and bool(enot_mid and enot_secret)
+            # InterKassa
+            interkassa_flag = database.get_setting("interkassa_enabled")
+            interkassa_shop_id = database.get_setting("interkassa_shop_id")
+            interkassa_secret_key = database.get_setting("interkassa_secret_key")
+            interkassa_enabled = (str(interkassa_flag).lower() in ("true", "1", "yes", "on")) and bool(interkassa_shop_id and interkassa_secret_key)
             
             ton_wallet_address = database.get_setting("ton_wallet_address")
             tonapi_key = database.get_setting("tonapi_key")
@@ -123,6 +143,10 @@ class BotController:
                 "tonconnect": tonconnect_enabled,
                 "stars": stars_enabled,
                 "yoomoney": yoomoney_enabled,
+                "unitpay": unitpay_enabled,
+                "freekassa": freekassa_enabled,
+                "enot": enot_enabled,
+                "interkassa": interkassa_enabled,
             }
             handlers.TELEGRAM_BOT_USERNAME = bot_username
             handlers.ADMIN_ID = admin_id
