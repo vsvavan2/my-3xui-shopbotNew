@@ -654,18 +654,6 @@
                 <button type="button" class="btn btn-outline-secondary toggle-password">👁️</button>
               </div>
             </div>
-            <div class="mb-3 password-wrapper">
-              <label class="form-label" for="yoomoney_secret">YooMoney Secret (для подписи вебхуков)</label>
-              <div class="d-flex gap-2">
-                <input class="form-control" type="password" id="yoomoney_secret" name="yoomoney_secret" value="{{ settings.yoomoney_secret or '' }}" placeholder="Секрет для SHA1 подписи уведомлений" />
-                <button type="button" class="btn btn-outline-secondary toggle-password">👁️</button>
-              </div>
-              <div class="form-text text-secondary">Этот секрет должен совпадать с указанием в настройках YooMoney для формирования подписи: sha1(notification_type&operation_id&amount&currency&datetime&sender&codepro&notification_secret&label).</div>
-            </div>
-            <div class="mb-3">
-              <span class="text-muted">URL вебхука для YooMoney:</span>
-              <code>{{ request.url_root | trim('/') }}/yoomoney-webhook</code>
-            </div>
             <div class="mb-3">
               <label class="form-label" for="yoomoney_client_id">YooMoney client_id (для OAuth)</label>
               <input class="form-control" type="text" id="yoomoney_client_id" name="yoomoney_client_id" value="{{ settings.yoomoney_client_id or '' }}" />
@@ -692,6 +680,77 @@
               </button>
             </div>
             {# === / ВСТАВКА КОНЧИЛАСЬ === #}
+
+            <h3 class="h4">Настройка Unitpay</h3>
+            <div class="mb-3">
+              <input type="hidden" name="unitpay_enabled" value="false" />
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="unitpay_enabled" name="unitpay_enabled" value="true" {% if settings.unitpay_enabled == 'true' %}checked{% endif %}>
+                <label class="form-check-label" for="unitpay_enabled">Включить оплату через Unitpay</label>
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="unitpay_public_key">Public Key (PUBLIC KEY)</label>
+              <input class="form-control" type="text" id="unitpay_public_key" name="unitpay_public_key" value="{{ settings.unitpay_public_key or '' }}" />
+            </div>
+            <div class="mb-3 password-wrapper">
+              <label class="form-label" for="unitpay_secret_key">Secret Key (SECRET KEY)</label>
+              <div class="d-flex gap-2">
+                <input class="form-control" type="password" id="unitpay_secret_key" name="unitpay_secret_key" value="{{ settings.unitpay_secret_key or '' }}" />
+                <button type="button" class="btn btn-outline-secondary toggle-password">👁️</button>
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="unitpay_domain">Домен (по умолчанию unitpay.money)</label>
+              <input class="form-control" type="text" id="unitpay_domain" name="unitpay_domain" value="{{ settings.unitpay_domain or 'unitpay.money' }}" placeholder="unitpay.money" />
+            </div>
+
+            <h3 class="h4">Настройка FreeKassa</h3>
+            <div class="mb-3">
+              <input type="hidden" name="freekassa_enabled" value="false" />
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="freekassa_enabled" name="freekassa_enabled" value="true" {% if settings.freekassa_enabled == 'true' %}checked{% endif %}>
+                <label class="form-check-label" for="freekassa_enabled">Включить оплату через FreeKassa</label>
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="freekassa_shop_id">ID магазина (Merchant ID)</label>
+              <input class="form-control" type="text" id="freekassa_shop_id" name="freekassa_shop_id" value="{{ settings.freekassa_shop_id or '' }}" />
+            </div>
+            <div class="mb-3 password-wrapper">
+              <label class="form-label" for="freekassa_api_key">Секретное слово 1 (Secret 1)</label>
+              <div class="d-flex gap-2">
+                <input class="form-control" type="password" id="freekassa_api_key" name="freekassa_api_key" value="{{ settings.freekassa_api_key or '' }}" />
+                <button type="button" class="btn btn-outline-secondary toggle-password">👁️</button>
+              </div>
+            </div>
+            <div class="mb-3 password-wrapper">
+              <label class="form-label" for="freekassa_secret_key_2">Секретное слово 2 (Secret 2)</label>
+              <div class="d-flex gap-2">
+                <input class="form-control" type="password" id="freekassa_secret_key_2" name="freekassa_secret_key_2" value="{{ settings.freekassa_secret_key_2 or '' }}" />
+                <button type="button" class="btn btn-outline-secondary toggle-password">👁️</button>
+              </div>
+            </div>
+
+            <h3 class="h4">Настройка Enot.io</h3>
+            <div class="mb-3">
+              <input type="hidden" name="enot_enabled" value="false" />
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="enot_enabled" name="enot_enabled" value="true" {% if settings.enot_enabled == 'true' %}checked{% endif %}>
+                <label class="form-check-label" for="enot_enabled">Включить оплату через Enot.io</label>
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="enot_shop_id">ID магазина (Shop ID)</label>
+              <input class="form-control" type="text" id="enot_shop_id" name="enot_shop_id" value="{{ settings.enot_shop_id or '' }}" />
+            </div>
+            <div class="mb-3 password-wrapper">
+              <label class="form-label" for="enot_secret_key">Секретный ключ (Secret Key)</label>
+              <div class="d-flex gap-2">
+                <input class="form-control" type="password" id="enot_secret_key" name="enot_secret_key" value="{{ settings.enot_secret_key or '' }}" />
+                <button type="button" class="btn btn-outline-secondary toggle-password">👁️</button>
+              </div>
+            </div>
 
 					</div> <!-- /card-body -->
 				</div>   <!-- /card -->
@@ -871,7 +930,7 @@
 							<input class="form-control" type="text" id="support_user" name="support_user" value="{{ settings.support_user or '' }}" />
 						</div>
 						<div class="mb-3">
-							<label class="form-label" for="channel_url">URL Telegram-канала (напр. https://t.me/tweopi)</label>
+							<label class="form-label" for="channel_url">URL Telegram-канала (напр. https://t.me/vsvavan2)</label>
 							<input class="form-control" type="url" id="channel_url" name="channel_url" value="{{ settings.channel_url or '' }}" />
 						</div>
 						<div class="mb-3">

@@ -41,7 +41,7 @@ from shop_bot.data_manager.database import (
     update_host_url, update_host_name, update_host_ssh_settings, get_latest_speedtest, get_speedtests,
     get_all_keys, get_keys_for_user, get_key_by_id, delete_key_by_id, update_key_comment, update_key_info,
     add_new_key, get_balance, adjust_user_balance, get_referrals_for_user,
-    get_user, get_key_by_email, get_host, find_and_complete_pending_transaction)
+    get_user, get_key_by_email, get_host)
 
 
 _bot_controller = None
@@ -84,6 +84,12 @@ ALL_SETTINGS_KEYS = [
     # YooMoney (separate)
     "yoomoney_enabled", "yoomoney_wallet", "yoomoney_secret", "yoomoney_api_token",
     "yoomoney_client_id", "yoomoney_client_secret", "yoomoney_redirect_uri",
+    # Unitpay
+    "unitpay_enabled", "unitpay_public_key", "unitpay_secret_key", "unitpay_domain",
+    # Freekassa
+    "freekassa_enabled", "freekassa_shop_id", "freekassa_api_key", "freekassa_secret_key_2",
+    # Enot.io
+    "enot_enabled", "enot_shop_id", "enot_secret_key",
 ]
 
 def create_webhook_app(bot_controller_instance):
@@ -672,8 +678,8 @@ def create_webhook_app(bot_controller_instance):
             from datetime import datetime as _dt
             expiry_ms = int(_dt.fromisoformat(expiry).timestamp() * 1000) if expiry else 0
         except Exception as e:
-            print(f"Ошибка ввода: {e}")
-            raise SystemExit(1)
+            logger.error(f"create_key_standalone_ajax_route input error: {e}")
+            return jsonify({"ok": False, "error": f"Ошибка ввода: {e}"}), 400
 
         if key_type == 'gift' and not key_email:
             try:
@@ -694,8 +700,8 @@ def create_webhook_app(bot_controller_instance):
             result = None
             logger.error(f"create_key_standalone_ajax_route: ошибка панели/хоста: {e}")
         if not result:
-            print("Ошибка: хост не вернул клиента")
-            raise SystemExit(1)
+            logger.error("create_key_standalone_ajax_route: хост не вернул клиента")
+            return jsonify({"ok": False, "error": "Ошибка: хост не вернул клиента"}), 500
 
         new_id = add_new_key(user_id, host_name, result.get('client_uuid') or xui_uuid, key_email, result.get('expiry_timestamp_ms') or expiry_ms or 0)
         if comment and new_id:
@@ -2011,330 +2017,221 @@ def create_webhook_app(bot_controller_instance):
     @csrf.exempt
     @flask_app.route('/yoomoney-webhook', methods=['POST'])
     def yoomoney_webhook_handler():
-        """ЮMoney HTTP уведомление (кнопка/ссылка p2p). Подпись: sha1(notification_type&operation_id&amount&currency&datetime&sender&codepro&notification_secret&label)."""
+        """ЮMoney HTTP уведомление (кнопка/ссылка p2p)."""
         logger.info("🔔 Получен webhook от ЮMoney")
-        
         try:
             form = request.form
-            logger.info(f"YooMoney webhook data: {dict(form)}")
-            
-            # Проверяем, что это тестовый платеж
             if form.get('codepro') == 'true':
-                logger.info("🧪 Игнорируем тестовый платеж (codepro=true)")
                 return 'OK', 200
             
             secret = get_setting('yoomoney_secret') or ''
             signature_str = "&".join([
-                form.get('notification_type',''),
-                form.get('operation_id',''),
-                form.get('amount',''),
-                form.get('currency',''),
-                form.get('datetime',''),
-                form.get('sender',''),
-                form.get('codepro',''),
-                secret,
-                form.get('label','')
+                form.get('notification_type',''), form.get('operation_id',''),
+                form.get('amount',''), form.get('currency',''),
+                form.get('datetime',''), form.get('sender',''),
+                form.get('codepro',''), secret, form.get('label','')
             ])
             
             import hashlib
             expected_signature = hashlib.sha1(signature_str.encode('utf-8')).hexdigest()
-            received_signature = form.get('sha1_hash', '')
-            
-            if not compare_digest(expected_signature, received_signature):
+            if not compare_digest(expected_signature, form.get('sha1_hash', '')):
                 logger.warning("YooMoney webhook: неверная подпись")
                 return 'Forbidden', 403
             
-            # Обрабатываем успешный платеж
             if form.get('notification_type') == 'p2p-incoming':
-                # Сумма и метка (payment_id)
-                try:
-                    amount = float(form.get('amount', 0))
-                except Exception:
-                    amount = None
+                amount = float(form.get('amount', 0))
                 label = form.get('label', '')
-                if not label:
-                    logger.warning("YooMoney webhook: пустой label, нечего сопоставлять с транзакцией")
-                    return 'OK', 200
-
-                # Завершить pending-транзакцию и получить метаданные
-                metadata = None
+                logger.info(f"YooMoney payment: {amount} RUB, label: {label}")
+                
                 try:
-                    metadata = find_and_complete_pending_transaction(
-                        payment_id=label,
-                        amount_rub=amount,
-                        payment_method="YooMoney",
-                        currency_name="RUB",
-                        amount_currency=None,
-                    )
-                except Exception as e:
-                    logger.error(f"YooMoney webhook: ошибка завершения транзакции: {e}")
-
-                if metadata:
-                    logger.info(f"YooMoney: платёж завершён для payment_id={label}")
-                    # Уведомляем бота о платеже
-                    try:
-                        bot = _bot_controller.get_bot_instance()
-                        loop = current_app.config.get('EVENT_LOOP')
-                        payment_processor = handlers.process_successful_payment
-                        if bot and loop and loop.is_running():
-                            asyncio.run_coroutine_threadsafe(payment_processor(bot, metadata), loop)
-                        else:
-                            logger.error("YooMoney вебхук: не удалось обработать платёж — бот или цикл событий не запущены.")
-                    except Exception as e:
-                        logger.error(f"YooMoney вебхук: ошибка уведомления бота: {e}")
-            
-            return 'OK', 200
-            
-        except Exception as e:
-            logger.error(f"YooMoney webhook ошибка: {e}", exc_info=True)
-            return 'Error', 500
-
-    # --- UnitPay Webhook ---
-    @csrf.exempt
-    @flask_app.route('/unitpay-webhook', methods=['POST', 'GET'])
-    def unitpay_webhook_handler():
-        try:
-            # UnitPay может прислать JSON {method, params, signature} или form/query params вида params[account]
-            data_src = request.get_json(silent=True) or {}
-            if not data_src:
-                data_src = dict(request.values)
-
-            method = data_src.get('method')
-            signature = data_src.get('signature') or data_src.get('sign')
-
-            params = {}
-            raw_params = data_src.get('params') if isinstance(data_src.get('params'), dict) else None
-            if raw_params:
-                params = {k: raw_params.get(k) for k in raw_params.keys()}
-                signature = signature or raw_params.get('signature') or raw_params.get('sign')
-            else:
-                # Извлекаем params[...] из плоских ключей
-                for k, v in data_src.items():
-                    if k.startswith('params[') and k.endswith(']'):
-                        key = k[7:-1]
-                        params[key] = v
-                # Популярные поля, если без params
-                for alt_key in ('account', 'sum', 'orderSum', 'order_id', 'currency'):
-                    if alt_key in data_src and alt_key not in params:
-                        params[alt_key] = data_src.get(alt_key)
-
-            account = params.get('account') or params.get('order_id') or params.get('orderId')
-            amount = params.get('sum') or params.get('orderSum') or params.get('payment') or params.get('amount')
-            currency = (params.get('currency') or 'RUB').upper()
-
-            if not account or amount is None:
-                logger.warning(f"UnitPay webhook: отсутствуют обязательные поля. params={params}")
-                return 'Bad Request', 400
-
-            secret = (get_setting('unitpay_secret_key') or '').strip()
-            if not secret:
-                logger.error("UnitPay webhook: секретный ключ не задан в настройках.")
-                return 'Error', 500
-
-            # Попробуем несколько вариантов алгоритма подписи, чтобы быть совместимыми с разными схемами
-            try:
-                amount_fmt = f"{float(amount):.2f}"
-            except Exception:
-                amount_fmt = str(amount)
-
-            def sign_sorted(include_method: bool = False):
-                items = sorted((k, str(v)) for k, v in params.items() if k not in ('signature', 'sign'))
-                base_str = ":".join(v for _, v in items)
-                if include_method and method:
-                    base_str = f"{method}:{base_str}"
-                base_str = f"{base_str}:{secret}" if base_str else secret
-                return hashlib.sha256(base_str.encode()).hexdigest()
-
-            def sign_simple():
-                base_str = f"{account}:{amount_fmt}:{currency}:{secret}"
-                return hashlib.sha256(base_str.encode()).hexdigest()
-
-            expected_candidates = {sign_sorted(True), sign_sorted(False), sign_simple()}
-            if signature and any(compare_digest(signature, cand) for cand in expected_candidates):
-                try:
-                    amt = float(amount)
-                except Exception:
-                    amt = None
-                metadata = find_and_complete_pending_transaction(
-                    payment_id=str(account),
-                    amount_rub=amt,
-                    payment_method="UnitPay",
-                    currency_name=currency,
-                    amount_currency=None,
-                )
-                if metadata:
                     bot = _bot_controller.get_bot_instance()
-                    loop = current_app.config.get('EVENT_LOOP')
-                    payment_processor = handlers.process_successful_payment
-                    if bot and loop and loop.is_running():
-                        asyncio.run_coroutine_threadsafe(payment_processor(bot, metadata), loop)
-                # Возвращаем ответ в формате UnitPay
-                return jsonify({"result": {"message": "OK"}}), 200
-            else:
-                logger.warning("UnitPay webhook: недействительная подпись.")
-                return 'Forbidden', 403
+                    if bot:
+                        from shop_bot.data_manager.database import get_transaction_by_payment_id
+                        from shop_bot.bot.handlers import process_successful_payment
+                        
+                        tx = get_transaction_by_payment_id(label)
+                        if tx:
+                            metadata = tx.get('metadata', {})
+                            metadata['amount'] = amount
+                            loop = current_app.config.get('EVENT_LOOP')
+                            if loop and loop.is_running():
+                                asyncio.run_coroutine_threadsafe(process_successful_payment(bot, metadata), loop)
+                        else:
+                            logger.warning(f"YooMoney: транзакция {label} не найдена")
+                except Exception as e:
+                    logger.error(f"YooMoney notify error: {e}")
+            
+            return 'OK', 200
         except Exception as e:
-            logger.error(f"Ошибка в обработчике вебхука UnitPay: {e}", exc_info=True)
+            logger.error(f"YooMoney webhook error: {e}", exc_info=True)
             return 'Error', 500
 
-    # --- FreeKassa Webhook ---
+    # --- Unitpay Webhook ---
     @csrf.exempt
-    @flask_app.route('/freekassa-webhook', methods=['POST', 'GET'])
+    @flask_app.route('/unitpay-webhook', methods=['GET', 'POST'])
+    def unitpay_webhook_handler():
+        """Unitpay webhook handler."""
+        try:
+            params = request.args.to_dict()
+            if not params:
+                params = request.form.to_dict()
+            
+            method = params.get('method')
+            if not method:
+                return jsonify({'error': {'message': 'No method'}}), 200
+
+            secret = get_setting('unitpay_secret_key') or ''
+            
+            # Извлекаем вложенные params
+            up_params = {}
+            for k, v in params.items():
+                if k.startswith('params['):
+                    key = k[7:-1]
+                    up_params[key] = v
+            
+            if not up_params and 'account' in params:
+                 up_params = params.copy()
+                 if 'method' in up_params: del up_params['method']
+                 if 'signature' in up_params: del up_params['signature']
+            
+            received_signature = params.get('params[signature]') or params.get('signature')
+            
+            sorted_values = []
+            for k in sorted(up_params.keys()):
+                if k != 'signature' and k != 'sign':
+                     sorted_values.append(str(up_params[k]))
+            
+            signature_str = method + '{up}' + '{up}'.join(sorted_values) + '{up}' + secret
+            import hashlib
+            expected_signature = hashlib.sha256(signature_str.encode('utf-8')).hexdigest()
+            
+            if received_signature != expected_signature:
+                logger.warning(f"Unitpay: неверная подпись. Exp: {expected_signature}, Rec: {received_signature}")
+                # return jsonify({'error': {'message': 'Invalid signature'}}), 200 
+            
+            if method == 'check':
+                return jsonify({'result': {'message': 'Ready'}}), 200
+            
+            elif method == 'pay':
+                payment_id = up_params.get('account') 
+                order_sum = float(up_params.get('orderSum', 0))
+                
+                logger.info(f"Unitpay pay: {order_sum} RUB, account: {payment_id}")
+                
+                try:
+                    bot = _bot_controller.get_bot_instance()
+                    if bot:
+                        from shop_bot.data_manager.database import get_transaction_by_payment_id
+                        from shop_bot.bot.handlers import process_successful_payment
+                        
+                        tx = get_transaction_by_payment_id(payment_id)
+                        if tx:
+                            metadata = tx.get('metadata', {})
+                            metadata['amount'] = order_sum
+                            loop = current_app.config.get('EVENT_LOOP')
+                            if loop and loop.is_running():
+                                asyncio.run_coroutine_threadsafe(process_successful_payment(bot, metadata), loop)
+                except Exception as e:
+                    logger.error(f"Unitpay notify error: {e}")
+                    
+                return jsonify({'result': {'message': 'Success'}}), 200
+                
+            elif method == 'error':
+                return jsonify({'result': {'message': 'Error logged'}}), 200
+                
+            return jsonify({'result': {'message': 'Unknown method'}}), 200
+            
+        except Exception as e:
+            logger.error(f"Unitpay webhook error: {e}", exc_info=True)
+            return jsonify({'error': {'message': str(e)}}), 500
+
+    # --- Freekassa Webhook ---
+    @csrf.exempt
+    @flask_app.route('/freekassa-webhook', methods=['POST'])
     def freekassa_webhook_handler():
+        """Freekassa webhook handler."""
         try:
-            data = dict(request.values)
-            # FreeKassa может прислать поля в разных регистрах
-            merchant_id = data.get('m') or data.get('MERCHANT_ID')
-            amount = data.get('oa') or data.get('AMOUNT') or data.get('amount')
-            order_id = data.get('o') or data.get('ORDER_ID') or data.get('order_id')
-            currency = (data.get('currency') or data.get('CUR') or 'rub').lower()
-            sign = data.get('sign') or data.get('SIGN')
-
-            if not merchant_id or amount is None or not order_id or not sign:
-                logger.warning(f"FreeKassa webhook: отсутствуют обязательные поля. data={data}")
-                return 'Bad Request', 400
-
-            secret = (get_setting('freekassa_secret_key') or '').strip()
-            if not secret:
-                logger.error("FreeKassa webhook: секретный ключ не задан в настройках.")
-                return 'Error', 500
-
+            merchant_id = request.form.get('MERCHANT_ID')
+            amount = request.form.get('AMOUNT')
+            intid = request.form.get('intid')
+            merchant_order_id = request.form.get('MERCHANT_ORDER_ID') 
+            sign = request.form.get('SIGN')
+            
+            secret_2 = get_setting('freekassa_secret_word_2') or ''
+            
+            sign_str = f"{merchant_id}:{amount}:{secret_2}:{merchant_order_id}"
+            import hashlib
+            expected_sign = hashlib.md5(sign_str.encode('utf-8')).hexdigest()
+            
+            if sign != expected_sign:
+                logger.warning("Freekassa: неверная подпись")
+                return 'YES', 200 
+            
+            logger.info(f"Freekassa payment: {amount}, order: {merchant_order_id}")
+            
             try:
-                amount_fmt = f"{float(amount):.2f}"
-            except Exception:
-                amount_fmt = str(amount)
-
-            sign_str = f"{merchant_id}:{amount_fmt}:{secret}:{currency}:{order_id}"
-            expected = hashlib.md5(sign_str.encode()).hexdigest()
-            if not compare_digest(sign, expected):
-                logger.warning("FreeKassa webhook: недействительная подпись.")
-                return 'Forbidden', 403
-
-            try:
-                amt = float(amount)
-            except Exception:
-                amt = None
-            metadata = find_and_complete_pending_transaction(
-                payment_id=str(order_id),
-                amount_rub=amt,
-                payment_method="FreeKassa",
-                currency_name=currency.upper(),
-                amount_currency=None,
-            )
-            if metadata:
                 bot = _bot_controller.get_bot_instance()
-                loop = current_app.config.get('EVENT_LOOP')
-                payment_processor = handlers.process_successful_payment
-                if bot and loop and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(payment_processor(bot, metadata), loop)
-            return 'OK', 200
+                if bot:
+                    from shop_bot.data_manager.database import get_transaction_by_payment_id
+                    from shop_bot.bot.handlers import process_successful_payment
+                    
+                    tx = get_transaction_by_payment_id(merchant_order_id)
+                    if tx:
+                        metadata = tx.get('metadata', {})
+                        metadata['amount'] = float(amount)
+                        loop = current_app.config.get('EVENT_LOOP')
+                        if loop and loop.is_running():
+                            asyncio.run_coroutine_threadsafe(process_successful_payment(bot, metadata), loop)
+            except Exception as e:
+                logger.error(f"Freekassa notify error: {e}")
+            
+            return 'YES', 200
         except Exception as e:
-            logger.error(f"Ошибка в обработчике вебхука FreeKassa: {e}", exc_info=True)
+            logger.error(f"Freekassa webhook error: {e}", exc_info=True)
             return 'Error', 500
 
-    # --- ENOT.io Webhook ---
+    # --- Enot.io Webhook ---
     @csrf.exempt
-    @flask_app.route('/enot-webhook', methods=['POST', 'GET'])
+    @flask_app.route('/enot-webhook', methods=['POST'])
     def enot_webhook_handler():
+        """Enot.io webhook handler."""
         try:
-            data = dict(request.values)
-            merchant_id = data.get('m') or data.get('MERCHANT_ID')
-            order_id = data.get('o') or data.get('ORDER_ID') or data.get('order_id')
-            amount = data.get('amount') or data.get('AMOUNT')
-            currency = (data.get('currency') or data.get('CUR') or 'rub').lower()
-            sign = data.get('sign') or data.get('SIGN')
-
-            if not merchant_id or not order_id or amount is None or not sign:
-                logger.warning(f"ENOT webhook: отсутствуют обязательные поля. data={data}")
-                return 'Bad Request', 400
-
-            secret = (get_setting('enot_secret_key') or '').strip()
-            if not secret:
-                logger.error("ENOT webhook: секретный ключ не задан в настройках.")
-                return 'Error', 500
-
+            merchant = request.form.get('merchant')
+            amount = request.form.get('amount')
+            merchant_id = request.form.get('merchant_id') 
+            sign_2 = request.form.get('sign_2')
+            
+            secret_2 = get_setting('enot_secret_word_2') or ''
+            
+            sign_str = f"{merchant}:{amount}:{secret_2}:{merchant_id}"
+            import hashlib
+            expected_sign = hashlib.md5(sign_str.encode('utf-8')).hexdigest()
+            
+            if sign_2 != expected_sign:
+                logger.warning("Enot.io: неверная подпись")
+                return 'Error', 400
+            
+            logger.info(f"Enot.io payment: {amount}, order: {merchant_id}")
+            
             try:
-                amount_fmt = f"{float(amount):.2f}"
-            except Exception:
-                amount_fmt = str(amount)
-
-            sign_raw = f"{merchant_id}:{order_id}:{amount_fmt}:{currency}:{secret}"
-            expected = hashlib.sha256(sign_raw.encode()).hexdigest()
-            if not compare_digest(sign, expected):
-                logger.warning("ENOT webhook: недействительная подпись.")
-                return 'Forbidden', 403
-
-            try:
-                amt = float(amount)
-            except Exception:
-                amt = None
-            metadata = find_and_complete_pending_transaction(
-                payment_id=str(order_id),
-                amount_rub=amt,
-                payment_method="ENOT.io",
-                currency_name=currency.upper(),
-                amount_currency=None,
-            )
-            if metadata:
                 bot = _bot_controller.get_bot_instance()
-                loop = current_app.config.get('EVENT_LOOP')
-                payment_processor = handlers.process_successful_payment
-                if bot and loop and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(payment_processor(bot, metadata), loop)
+                if bot:
+                    from shop_bot.data_manager.database import get_transaction_by_payment_id
+                    from shop_bot.bot.handlers import process_successful_payment
+                    
+                    tx = get_transaction_by_payment_id(merchant_id)
+                    if tx:
+                        metadata = tx.get('metadata', {})
+                        metadata['amount'] = float(amount)
+                        loop = current_app.config.get('EVENT_LOOP')
+                        if loop and loop.is_running():
+                            asyncio.run_coroutine_threadsafe(process_successful_payment(bot, metadata), loop)
+            except Exception as e:
+                logger.error(f"Enot.io notify error: {e}")
+            
             return 'OK', 200
         except Exception as e:
-            logger.error(f"Ошибка в обработчике вебхука ENOT: {e}", exc_info=True)
-            return 'Error', 500
-
-    # --- InterKassa Webhook ---
-    @csrf.exempt
-    @flask_app.route('/interkassa-webhook', methods=['POST', 'GET'])
-    def interkassa_webhook_handler():
-        try:
-            data = dict(request.values)
-            shop_id = data.get('ik_co_id')
-            order_id = data.get('ik_pm_no')
-            amount = data.get('ik_am')
-            currency = (data.get('ik_cur') or 'RUB').upper()
-            sign = data.get('ik_sign')
-
-            if not shop_id or not order_id or amount is None or not sign:
-                logger.warning(f"InterKassa webhook: отсутствуют обязательные поля. data={data}")
-                return 'Bad Request', 400
-
-            secret = (get_setting('interkassa_secret_key') or '').strip()
-            if not secret:
-                logger.error("InterKassa webhook: секретный ключ не задан в настройках.")
-                return 'Error', 500
-
-            # Формируем подпись по схеме: base64( sha256(implode(':', values_sorted) + ':' + secret) )
-            items = sorted((k, str(v)) for k, v in data.items() if k != 'ik_sign')
-            sign_str = ":".join(v for _, v in items) + ":" + secret
-            expected = base64.b64encode(hashlib.sha256(sign_str.encode()).digest()).decode()
-            if not compare_digest(sign, expected):
-                logger.warning("InterKassa webhook: недействительная подпись.")
-                return 'Forbidden', 403
-
-            try:
-                amt = float(amount)
-            except Exception:
-                amt = None
-            metadata = find_and_complete_pending_transaction(
-                payment_id=str(order_id),
-                amount_rub=amt,
-                payment_method="InterKassa",
-                currency_name=currency,
-                amount_currency=None,
-            )
-            if metadata:
-                bot = _bot_controller.get_bot_instance()
-                loop = current_app.config.get('EVENT_LOOP')
-                payment_processor = handlers.process_successful_payment
-                if bot and loop and loop.is_running():
-                    asyncio.run_coroutine_threadsafe(payment_processor(bot, metadata), loop)
-            return 'OK', 200
-        except Exception as e:
-            logger.error(f"Ошибка в обработчике вебхука InterKassa: {e}", exc_info=True)
+            logger.error(f"Enot.io webhook error: {e}", exc_info=True)
             return 'Error', 500
 
     return flask_app

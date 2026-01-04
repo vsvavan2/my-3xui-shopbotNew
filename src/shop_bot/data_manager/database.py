@@ -248,20 +248,6 @@ def initialize_db():
                 "cryptobot_token": None,
                 "heleket_merchant_id": None,
                 "heleket_api_key": None,
-                # Дополнительные платёжные провайдеры
-                "unitpay_enabled": "false",
-                "unitpay_merchant_id": None,
-                "unitpay_secret_key": None,
-                "unitpay_allowed_methods": "cards,sbp",
-                "freekassa_enabled": "false",
-                "freekassa_merchant_id": None,
-                "freekassa_secret_key": None,
-                "enot_enabled": "false",
-                "enot_merchant_id": None,
-                "enot_secret_key": None,
-                "interkassa_enabled": "false",
-                "interkassa_shop_id": None,
-                "interkassa_secret_key": None,
                 "domain": None,
                 "ton_wallet_address": None,
                 "tonapi_key": None,
@@ -1138,6 +1124,31 @@ def delete_key_by_id(key_id: int) -> bool:
             return affected > 0
     except sqlite3.Error as e:
         logging.error(f"Не удалось удалить ключ по id {key_id}: {e}")
+        return False
+
+def get_key_by_id(key_id: int) -> dict | None:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM vpn_keys WHERE key_id = ?", (key_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logging.error(f"Error getting key by id {key_id}: {e}")
+        return None
+
+def update_key_expiry(key_id: int, expiry_timestamp_ms: int) -> bool:
+    try:
+        # Convert ms timestamp to datetime string
+        expiry_date = datetime.fromtimestamp(expiry_timestamp_ms / 1000)
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE vpn_keys SET expiry_date = ? WHERE key_id = ?", (expiry_date, key_id))
+            conn.commit()
+            return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        logging.error(f"Error updating key expiry for {key_id}: {e}")
         return False
 
 def update_key_comment(key_id: int, comment: str) -> bool:
