@@ -3,6 +3,7 @@ import uuid
 import hashlib
 import json
 import urllib.parse
+from datetime import datetime
 from decimal import Decimal
 from urllib.parse import urlencode
 
@@ -16,22 +17,368 @@ from shop_bot.data_manager.database import (
     get_user, get_plan_by_id, get_setting, create_pending_transaction,
     update_transaction_status, update_user_balance,
     get_promo_code, use_promo_code, create_user_key, get_user_keys,
-    get_transaction_by_payment_id, get_host_by_name, get_key_by_id, update_key_expiry
+    get_transaction_by_payment_id, get_host_by_name, get_key_by_id, update_key_expiry,
+    register_user_if_not_exists, get_all_hosts, get_plans_for_host
 )
-from shop_bot.bot import keyboards
 from shop_bot.modules import xui_api
+from shop_bot.bot import keyboards
+from shop_bot.bot.states import PaymentProcess, TopUpProcess
+
 
 logger = logging.getLogger(__name__)
 user_router = Router()
 
+@user_router.message(CommandStart())
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    user = message.from_user
+    
+    # Определяем реферера
+    referrer_id = None
+    args = message.text.split()
+    if len(args) > 1:
+        try:
+            potential_ref = int(args[1])
+            if potential_ref != user.id:
+                referrer_id = potential_ref
+        except ValueError:
+            pass
+            
+    # Регистрация пользователя (или обновление данных)
+    register_user_if_not_exists(user.id, user.username, referrer_id)
+    
+    # Приветствие
+    welcome_text = get_setting("welcome_message") or "Добро пожаловать в бот продажи VPN!"
+    
+    # Клавиатура
+    keys = get_user_keys(user.id)
+    trial_enabled = get_setting("trial_enabled") == "true"
+    admin_id_str = get_setting("admin_telegram_id")
+    is_admin = str(user.id) == str(admin_id_str)
+    
+    kb = keyboards.create_main_menu_keyboard(keys, trial_enabled, is_admin)
+    
+    await message.answer(welcome_text, reply_markup=kb)
+
+@user_router.callback_query(F.data == "main_menu")
+@user_router.callback_query(F.data == "back_to_main_menu")
+async def show_main_menu(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    user_id = callback.from_user.id
+    keys = get_user_keys(user_id)
+    trial_enabled = get_setting("trial_enabled") == "true"
+    admin_id_str = get_setting("admin_telegram_id")
+    is_admin = str(user_id) == str(admin_id_str)
+    
+    welcome_text = get_setting("welcome_message") or "Главное меню:"
+    kb = keyboards.create_main_menu_keyboard(keys, trial_enabled, is_admin)
+    
+    # Пытаемся редактировать сообщение, если не получается (например, старое сообщение удалено) - отправляем новое
+    try:
+        await callback.message.edit_text(welcome_text, reply_markup=kb)
+    except Exception:
+        await callback.message.answer(welcome_text, reply_markup=kb)
+
+@user_router.callback_query(F.data == "show_profile")
+async def show_profile(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    user_data = get_user(user_id)
+    if not user_data:
+        await callback.answer("Ошибка: пользователь не найден", show_alert=True)
+        return
+
+    keys = get_user_keys(user_id)
+    balance = user_data.get('balance', 0)
+    spent = user_data.get('total_spent', 0)
+    
+    text = (
+        f"👤 <b>Ваш профиль:</b>\n\n"
+        f"🆔 ID: <code>{user_id}</code>\n"
+        f"💰 Баланс: <b>{balance} RUB</b>\n"
+        f"💸 Потрачено: <b>{spent} RUB</b>\n"
+        f"🔑 Активных ключей: <b>{len(keys)}</b>"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Пополнить баланс", callback_data="top_up_start")
+    builder.button(text="🔙 Назад", callback_data="main_menu")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(text, reply_markup=builder.as_markup())
+
+@user_router.callback_query(F.data == "buy_new_key")
+async def start_buy_process(callback: types.CallbackQuery, state: FSMContext):
+    # Получаем список хостов/локаций
+    hosts = get_all_hosts()
+    if not hosts:
+        await callback.answer("Нет доступных серверов", show_alert=True)
+        return
+        
+    builder = InlineKeyboardBuilder()
+    for host in hosts:
+        # Используем токен для callback_data
+        token = keyboards.encode_host_callback_token(host['host_name'])
+        builder.button(text=host['host_name'], callback_data=f"select_host:buy:{token}")
+    
+    builder.button(text="🔙 Назад", callback_data="main_menu")
+    builder.adjust(1)
+    
+    await callback.message.edit_text("🌍 Выберите локацию:", reply_markup=builder.as_markup())
+
+@user_router.callback_query(F.data.startswith("select_host:buy:"))
+async def select_host_handler(callback: types.CallbackQuery, state: FSMContext):
+    parts = keyboards.parse_host_callback_data(callback.data)
+    if not parts:
+        await callback.answer("Ошибка данных", show_alert=True)
+        return
+    _, _, token = parts
+    
+    hosts = get_all_hosts()
+    host = keyboards.find_host_by_callback_token(hosts, token)
+    
+    if not host:
+        await callback.answer("Сервер не найден", show_alert=True)
+        return
+        
+    # Сохраняем выбранный хост в состояние
+    await state.update_data(host_name=host['host_name'], action="buy_key")
+    
+    # Получаем тарифы для хоста
+    plans = get_plans_for_host(host['host_name'])
+    if not plans:
+        await callback.answer("Для этого сервера нет активных тарифов", show_alert=True)
+        return
+        
+    builder = InlineKeyboardBuilder()
+    for plan in plans:
+        builder.button(
+            text=f"{plan['plan_name']} - {plan['price']}₽ ({plan['months']} мес.)", 
+            callback_data=f"select_plan:{plan['plan_id']}"
+        )
+        
+    builder.button(text="🔙 Назад", callback_data="buy_new_key")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(f"📋 Выберите тариф для {host['host_name']}:", reply_markup=builder.as_markup())
+
+@user_router.callback_query(F.data.startswith("select_plan:"))
+async def select_plan_handler(callback: types.CallbackQuery, state: FSMContext):
+    plan_id_str = callback.data.split(":")[1]
+    try:
+        plan_id = int(plan_id_str)
+    except ValueError:
+        await callback.answer("Ошибка ID тарифа", show_alert=True)
+        return
+        
+    plan = get_plan_by_id(plan_id)
+    if not plan:
+        await callback.answer("Тариф не найден", show_alert=True)
+        return
+        
+    await state.update_data(plan_id=plan_id, price=plan['price'], months=plan['months'])
+    
+    # Переходим к оплате
+    await show_payment_methods(callback, state)
+
+async def show_payment_methods(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    plan_id = data.get('plan_id')
+    plan = get_plan_by_id(plan_id)
+    price = plan['price']
+    
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопка оплаты балансом
+    builder.button(text=f"💰 С баланса бота", callback_data="pay_balance")
+    
+    # Кнопки платежек (проверяем настройки)
+    if get_setting("yookassa_shop_id") and get_setting("yookassa_secret_key"):
+        builder.button(text="YooKassa (РФ карты)", callback_data="pay_yookassa")
+        
+    if get_setting("yoomoney_wallet"):
+        builder.button(text="YooMoney (Кошелек/Карта)", callback_data="pay_yoomoney")
+
+    if get_setting("unitpay_public_key"):
+        builder.button(text="Unitpay", callback_data="pay_unitpay")
+        
+    if get_setting("freekassa_shop_id"):
+        builder.button(text="FreeKassa (Crypto/Cards)", callback_data="pay_freekassa")
+        
+    builder.button(text="🔙 Назад", callback_data="main_menu")
+    builder.adjust(1)
+    
+    await state.set_state(PaymentProcess.waiting_for_payment_method)
+    await callback.message.edit_text(
+        f"💳 К оплате: <b>{price} RUB</b>\n"
+        f"Тариф: {plan['name']}\n"
+        f"Выберите способ оплаты:",
+        reply_markup=builder.as_markup()
+    )
+
+@user_router.callback_query(PaymentProcess.waiting_for_payment_method, F.data == "pay_balance")
+async def pay_with_balance(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user_data = get_user(user_id)
+    data = await state.get_data()
+    
+    price = float(data.get('price', 0))
+    balance = float(user_data.get('balance', 0))
+    
+    if balance < price:
+        await callback.answer("Недостаточно средств на балансе", show_alert=True)
+        return
+        
+    # Списываем баланс и выдаем ключ
+    new_balance = update_user_balance(user_id, -price)
+    
+    # Создаем фиктивную транзакцию для истории
+    payment_id = str(uuid.uuid4())
+    metadata = {
+        "payment_id": payment_id,
+        "user_id": user_id,
+        "price": price,
+        "action": data.get('action'),
+        "key_id": data.get('key_id'),
+        "host_name": data.get('host_name'),
+        "plan_id": data.get('plan_id'),
+        "months": data.get('months'),
+        "payment_method": "Balance"
+    }
+    create_pending_transaction(payment_id, user_id, price, metadata)
+    
+    # Сразу обрабатываем как успешный платеж
+    await process_successful_payment(callback.bot, metadata)
+    await state.clear()
+    
+    # Возвращаем в меню (process_successful_payment отправит сообщение с ключом)
+    # Можно отправить дополнительное уведомление или просто обновить меню
+    # await show_main_menu(callback, state) # process_successful_payment отправляет новое сообщение, так что тут просто ответим
+    await callback.answer()
+
+@user_router.callback_query(F.data == "top_up_start")
+async def start_top_up(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(TopUpProcess.waiting_for_topup_amount)
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Отмена", callback_data="main_menu")
+    await callback.message.edit_text("Введите сумму пополнения в RUB:", reply_markup=builder.as_markup())
+
+@user_router.message(TopUpProcess.waiting_for_topup_amount)
+async def process_top_up_amount(message: types.Message, state: FSMContext):
+    try:
+        amount = float(message.text.replace(',', '.'))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Пожалуйста, введите корректное число (больше 0).")
+        return
+        
+    await state.update_data(topup_amount=amount)
+    
+    builder = InlineKeyboardBuilder()
+    if get_setting("yookassa_shop_id"):
+        builder.button(text="YooKassa", callback_data="topup_pay_yookassa")
+    if get_setting("yoomoney_wallet"):
+        builder.button(text="YooMoney", callback_data="topup_pay_yoomoney")
+    if get_setting("unitpay_public_key"):
+        builder.button(text="Unitpay", callback_data="topup_pay_unitpay")
+    if get_setting("freekassa_shop_id"):
+        builder.button(text="FreeKassa", callback_data="topup_pay_freekassa")
+        
+    builder.button(text="🔙 Назад", callback_data="main_menu")
+    builder.adjust(1)
+    
+    await state.set_state(TopUpProcess.waiting_for_topup_method)
+    await message.answer(f"Сумма пополнения: {amount} RUB.\nВыберите способ оплаты:", reply_markup=builder.as_markup())
+
+@user_router.callback_query(F.data == "show_help")
+async def show_help(callback: types.CallbackQuery):
+    help_text = get_setting("help_text") or "По всем вопросам обращайтесь в поддержку."
+    support_url = get_setting("support_url")
+    
+    builder = InlineKeyboardBuilder()
+    if support_url:
+        builder.button(text="Написать в поддержку", url=support_url)
+    builder.button(text="🔙 Назад", callback_data="main_menu")
+    builder.adjust(1)
+    
+    await callback.message.edit_text(help_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+@user_router.callback_query(F.data == "show_about")
+async def show_about(callback: types.CallbackQuery):
+    about_text = get_setting("about_text") or "О сервисе..."
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад", callback_data="main_menu")
+    await callback.message.edit_text(about_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+@user_router.callback_query(F.data == "howto_vless")
+async def show_howto(callback: types.CallbackQuery):
+    howto_text = get_setting("howto_text") or "Инструкция по подключению..."
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад", callback_data="main_menu")
+    await callback.message.edit_text(howto_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+@user_router.callback_query(F.data == "manage_keys")
+async def show_user_keys(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    keys = get_user_keys(user_id)
+    
+    if not keys:
+        await callback.answer("У вас пока нет активных ключей", show_alert=True)
+        return
+        
+    for key in keys:
+        # Показываем информацию о ключе
+        # key: {'id', 'key_id', 'host_name', 'key_email', 'expiry_time', 'is_active', ...}
+        expiry = datetime.fromtimestamp(key['expiry_time']/1000).strftime('%Y-%m-%d %H:%M') if key.get('expiry_time') else "Бессрочно"
+        
+        text = (
+            f"🔑 <b>Ключ:</b> {key.get('key_email')}\n"
+            f"🌍 <b>Сервер:</b> {key.get('host_name')}\n"
+            f"⏳ <b>Истекает:</b> {expiry}\n"
+            f"🔗 <code>{key.get('access_url')}</code>" # Предполагаем, что access_url есть или надо генерировать
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="📅 Продлить", callback_data=f"renew_key:{key['id']}")
+        # Можно добавить кнопку "Инструкция" или "QR код"
+        
+        await callback.message.answer(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+        
+    # В конце можно добавить кнопку возврата в меню
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 В меню", callback_data="main_menu")
+    await callback.message.answer("---", reply_markup=builder.as_markup())
+
+@user_router.callback_query(F.data == "show_referral_program")
+async def show_referral_program(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    user = get_user(user_id)
+    
+    bot_username = (await callback.bot.get_me()).username
+    ref_link = f"https://t.me/{bot_username}?start={user_id}"
+    
+    ref_count = 0 # TODO: Добавить функцию подсчета рефералов
+    ref_balance = user.get('referral_balance', 0)
+    
+    text = (
+        f"🤝 <b>Реферальная программа</b>\n\n"
+        f"Приглашайте друзей и получайте бонусы!\n"
+        f"Ваша ссылка:\n<code>{ref_link}</code>\n\n"
+        f"👥 Приглашено: {ref_count}\n"
+        f"💰 Бонусный баланс: {ref_balance} RUB"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад", callback_data="main_menu")
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+@user_router.callback_query(F.data == "user_speedtest")
+async def run_user_speedtest(callback: types.CallbackQuery):
+    await callback.answer("Функция в разработке", show_alert=True)
+
 PAYMENT_METHODS = {}
 
-class PaymentProcess(StatesGroup):
-    waiting_for_payment_method = State()
 
-class TopUpProcess(StatesGroup):
-    waiting_for_topup_amount = State()
-    waiting_for_topup_method = State()
 
 # --- Successful Payment Processor ---
 async def process_successful_payment(bot: Bot, metadata: dict):
@@ -102,7 +449,7 @@ async def process_successful_payment(bot: Bot, metadata: dict):
                 # Получаем данные хоста
                 # host = get_host_by_name(host_name) # Предполагаем наличие такой функции или берем из settings
                 # Для создания ключа используем xui_api
-                client = await xui_api.create_client(host_name, email, months=months)
+                client = await xui_api.create_or_update_key_on_host(host_name, email, days_to_add=months*30)
                 
                 if client:
                     # Сохраняем в БД
@@ -671,3 +1018,7 @@ def _build_enot_url(shop_id: str, secret_key: str, amount: float, order_id: str)
         "s": sign
     })
     return f"https://enot.io/pay/{shop_id}?{qs}"
+
+def get_user_router() -> Router:
+    return user_router
+
