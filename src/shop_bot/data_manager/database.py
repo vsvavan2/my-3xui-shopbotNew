@@ -7,7 +7,7 @@ import re
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path("/app/project")
+PROJECT_ROOT = Path("/app/project") if Path("/app/project").exists() else Path(".")
 DB_FILE = PROJECT_ROOT / "users.db"
 
 def normalize_host_name(name: str | None) -> str:
@@ -465,6 +465,23 @@ def check_promo_code_available(code: str, user_id: int) -> tuple[dict | None, st
     except sqlite3.Error as e:
         logging.error(f"Ошибка проверки доступности промокода: {e}")
         return None, "db_error"
+
+
+def use_promo_code(user_id: int, code: str) -> dict | None:
+    """
+    Применяет промокод для пользователя.
+    Возвращает словарь с результатом (discount_amount, discount_percent и т.д.) или None при ошибке.
+    Это обертка над check_promo_code_available и логикой применения.
+    """
+    promo, error = check_promo_code_available(code, user_id)
+    if error or not promo:
+        return None
+    
+    # Здесь можно добавить логику записи использования промокода, если это необходимо
+    # Например:
+    # record_promo_usage(code, user_id)
+    
+    return promo
 
 
 def update_promo_code_status(code: str, *, is_active: bool | None = None) -> bool:
@@ -1278,6 +1295,50 @@ def find_and_complete_pending_transaction(
         logging.error(f"Не удалось завершить ожидающую транзакцию {payment_id}: {e}")
         return None
 
+def update_transaction_status(payment_id: str, status: str, amount_rub: float = None, payment_method: str = None) -> bool:
+    """Обновить статус транзакции (например, на 'paid' или 'failed')."""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            
+            # Строим динамический запрос
+            update_parts = ["status = ?"]
+            params = [status]
+            
+            if amount_rub is not None:
+                update_parts.append("amount_rub = ?")
+                params.append(amount_rub)
+            
+            if payment_method is not None:
+                update_parts.append("payment_method = ?")
+                params.append(payment_method)
+            
+            params.append(payment_id)
+            
+            query = f"UPDATE transactions SET {', '.join(update_parts)} WHERE payment_id = ?"
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        logging.error(f"Ошибка обновления статуса транзакции {payment_id}: {e}")
+        return False
+
+def update_user_balance(user_id: int, amount: float) -> float:
+    """Обновляет баланс пользователя и возвращает новое значение."""
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (amount, user_id))
+            conn.commit()
+            
+            # Получаем обновленный баланс
+            cursor.execute("SELECT balance FROM users WHERE telegram_id = ?", (user_id,))
+            row = cursor.fetchone()
+            return row[0] if row else 0.0
+    except sqlite3.Error as e:
+        logging.error(f"Ошибка обновления баланса пользователя {user_id}: {e}")
+        return 0.0
+
 def insert_host_speedtest(
     host_name: str,
     method: str,
@@ -1419,6 +1480,26 @@ def get_keys_for_user(user_id: int) -> list[dict]:
         logging.error(f"Не удалось get keys for user {user_id}: {e}")
         return []
 
+def create_user_key(user_id: int, host_name: str, xui_client_uuid: str, key_email: str, expiry_timestamp_ms: int) -> int | None:
+    try:
+        host_name = normalize_host_name(host_name)
+        expiry_date = datetime.fromtimestamp(expiry_timestamp_ms / 1000).isoformat()
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO vpn_keys (user_id, host_name, xui_client_uuid, key_email, expiry_date) VALUES (?, ?, ?, ?, ?)",
+                (user_id, host_name, xui_client_uuid, key_email, expiry_date)
+            )
+            conn.commit()
+            return cursor.lastrowid
+    except sqlite3.IntegrityError as e:
+        logging.error(f"Не удалось создать ключ для пользователя {user_id}: дублирующийся email {key_email}: {e}")
+        return None
+    except sqlite3.Error as e:
+        logging.error(f"Не удалось создать ключ для пользователя {user_id}: {e}")
+        return None
+
+
 def get_key_by_id(key_id: int) -> dict | None:
     try:
         with sqlite3.connect(DB_FILE) as conn:
@@ -1438,7 +1519,7 @@ def update_key_email(key_id: int, new_email: str) -> bool:
             cursor.execute("UPDATE vpn_keys SET key_email = ? WHERE key_id = ?", (new_email, key_id))
             conn.commit()
             return cursor.rowcount > 0
-    except sqlite3.IntegrityОшибка as e:
+    except sqlite3.IntegrityError as e:
         logging.error(f"Нарушение уникальности email для ключа {key_id}: {e}")
         return False
     except sqlite3.Error as e:
@@ -1471,7 +1552,7 @@ def create_gift_key(user_id: int, host_name: str, key_email: str, months: int, x
             )
             conn.commit()
             return cursor.lastrowid
-    except sqlite3.IntegrityОшибка as e:
+    except sqlite3.IntegrityError as e:
         logging.error(f"Не удалось создать подарочный ключ для пользователя {user_id}: дублирующийся email {key_email}: {e}")
         return None
     except sqlite3.Error as e:
@@ -2185,6 +2266,7 @@ def get_recent_transactions(limit: int = 15) -> list[dict]:
                 LIMIT ?;
             """
             cursor.execute(query, (limit,))
+            transactions = [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error as e:
         logging.error(f"Не удалось get recent transactions: {e}")
     return transactions
@@ -3013,3 +3095,19 @@ def get_metrics_series(scope: str, object_name: str, *, since_hours: int = 24, l
     except sqlite3.Error as e:
         logging.error("Не удалось get metrics series for %s/%s: %s", scope, object_name, e)
         return []
+
+def get_transaction_by_payment_id(payment_id: str) -> dict | None:
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM transactions WHERE payment_id = ?", (payment_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    except sqlite3.Error as e:
+        logging.error(f"Не удалось get transaction by payment_id {payment_id}: {e}")
+        return None
+
+def get_host_by_name(host_name: str) -> dict | None:
+    return get_host(host_name)
+
